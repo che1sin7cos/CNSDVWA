@@ -1,0 +1,94 @@
+def handle_upload(req):
+    if not authenticated(req.user):
+        return error_response(401, "Unauthorized")
+    if not has_permission(req.user, "upload"):
+        return error_response(403, "Forbidden")
+
+    uploaded = req.get_file("file")
+    if uploaded is None:
+        return error_response(400, "No file provided")
+
+    MAX_BYTES = 10 * 1024 * 1024
+    if uploaded.size > MAX_BYTES:
+        return error_response(413, "File too large")
+
+    allowed_exts = {"jpg", "jpeg", "png", "gif", "pdf", "txt"}
+    ext = get_extension(uploaded.original_name).lower()
+    if ext not in allowed_exts:
+        return error_response(415, "Unsupported file type")
+
+    allowed_mimes = {"image/jpeg", "image/png", "image/gif", "application/pdf", "text/plain"}
+    if uploaded.mime_type not in allowed_mimes:
+        return error_response(415, "Unsupported media type")
+
+    if not verify_magic_bytes(uploaded.stream, uploaded.mime_type):
+        return error_response(415, "File content mismatch")
+
+    base_name = clean_filename(strip_path(uploaded.original_name))
+    stored_name = random_token(32) + "." + ext
+
+    storage_path = path_join(SAFE_STORAGE_DIR, stored_name)
+    temp_path = path_join(TEMP_DIR, stored_name + ".tmp")
+    write_stream(uploaded.stream, temp_path)
+
+    if ext in ("jpg", "jpeg", "png", "gif"):
+        transcode_image(temp_path, storage_path)
+    else:
+        move_file(temp_path, storage_path)
+
+    set_permissions(storage_path, OWNER_READ_WRITE)
+
+    scan_result = run_antivirus(storage_path)
+    if not scan_result.clean:
+        remove_file(storage_path)
+        return error_response(415, "Malicious content detected")
+
+    token = create_short_token(req.user.id, stored_name, minutes=10)
+
+    audit("upload", user=req.user.id, filename=base_name, stored=stored_name, size=uploaded.size)
+
+    return success_response({
+        "fileId": stored_name,
+        "accessUrl": make_serve_url(stored_name, token=token)
+    })
+
+
+def verify_magic_bytes(stream, expected_mime):
+    head = read_bytes(stream, 16)
+    stream.seek(0)
+    return match_magic_signature(head, expected_mime)
+
+
+def clean_filename(name):
+    cleaned = remove_control_and_special(name)
+    if cleaned == "" or len(cleaned) > 100:
+        cleaned = "file"
+    return cleaned
+
+
+def transcode_image(src, dst):
+    img = open_image(src)
+    img = convert_color_model(img)
+    img = limit_dimensions(img, max_w=8000, max_h=8000)
+    img.strip_meta()
+    img.save(dst, quality=90)
+
+
+def make_serve_url(stored_name, token):
+    return BASE_URL + "/safeServe?file=" + stored_name + "&token=" + token
+
+
+def safe_serve(req):
+    token = req.query.get("token")
+    file_id = req.query.get("file")
+    if not token_valid(token, file_id):
+        return error_response(403, "Invalid token")
+
+    path = path_join(SAFE_STORAGE_DIR, file_id)
+    if not exists(path):
+        return error_response(404, "Not found")
+
+    mapped = extension_to_mime(get_extension(file_id))
+    set_response_header("Content-Disposition", 'attachment; filename="download"')
+    set_response_header("Content-Type", mapped)
+    return stream_file(path)
