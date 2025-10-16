@@ -1,0 +1,27 @@
+def process_request(req):
+    user_q = req.get_param("q", default="")
+
+    if not passes_whitelist(user_q):
+        return http_response(400, "Bad request: input rejected")
+
+    usage = resolve_output_context(req)
+    safe_value = escape_for(usage, user_q)
+
+    headers = {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Security-Policy": "default-src 'none'; script-src 'self'; object-src 'none';",
+        "X-Content-Type-Options": "nosniff",
+    }
+    for k, v in headers.items():
+        set_header(k, v)
+
+    set_cookie(
+        name="session",
+        value=session_value,
+        http_only=True,
+        secure=True,
+        same_site="Strict"
+    )
+
+    html = render_template("result.html", data=safe_value)
+    return http_response(200, html)
